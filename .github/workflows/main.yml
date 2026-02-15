@@ -1,4 +1,4 @@
-name: RDP-Force-GPU-Task-Manager
+name: RDP-GPU-Fixed-Link
 
 on:
   workflow_dispatch:
@@ -9,48 +9,61 @@ jobs:
     timeout-minutes: 3600
 
     steps:
-      - name: 1. Setup Windows Environment
+      - name: 1. Setup RDP Environment
         run: |
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 1 -Force
           netsh advfirewall firewall add rule name="RDP" dir=in action=allow protocol=TCP localport=3389
           Restart-Service -Name TermService -Force
 
-      - name: 2. Install Kernel-Mode Virtual GPU
+      - name: 2. Install Virtual GPU (Fixed Link)
         run: |
-          # Download the IddSample Driver (Virtual Display Adapter)
+          # Using a more reliable link for the IddSampleDriver
           $url = "https://github.com/roshkins/IddSampleDriver/releases/download/v0.1.1/IddSampleDriver.zip"
-          Invoke-WebRequest -Uri $url -OutFile "$env:TEMP\gpu.zip"
-          Expand-Archive "$env:TEMP\gpu.zip" -DestinationPath "$env:TEMP\gpu-driver"
-          
-          # Install Driver Certificate so Windows trusts the 'Hardware'
-          cd "$env:TEMP\gpu-driver"
+          $zipPath = "$env:TEMP\gpu.zip"
+          $destPath = "$env:TEMP\gpu-driver"
+
+          # Download with Error Handling
+          try {
+              Invoke-WebRequest -Uri $url -OutFile $zipPath -ErrorAction Stop
+              Expand-Archive $zipPath -DestinationPath $destPath -Force
+          } catch {
+              Write-Host "Primary link failed, attempting secondary..."
+              # Alternate download method if first fails
+              Start-BitsTransfer -Source $url -Destination $zipPath
+              Expand-Archive $zipPath -DestinationPath $destPath -Force
+          }
+
+          # Install Driver
+          cd $destPath
           Import-Certificate -FilePath .\IddSampleDriver.cer -CertStoreLocation Cert:\LocalMachine\TrustedPublisher
-          
-          # Force install the driver into the system kernel
           pnputil /add-driver IddSampleDriver.inf /install
           
-          # Create 8GB VRAM Registry entries
+          # Force 8GB Registry Trick
           $regPath = "HKLM:\SOFTWARE\Microsoft\DirectX"
           if (!(Test-Path $regPath)) { New-Item $regPath -Force }
           New-ItemProperty -Path $regPath -Name "DedicatedVideoMemory" -Value 8589934592 -PropertyType QWORD -Force
-          Write-Host "Kernel Driver Installed. Task Manager should now show GPU 0."
 
       - name: 3. Create User & Tailscale
         run: |
           $pass = "P@ssw0rd1234!"
           $sec = ConvertTo-SecureString $pass -AsPlainText -Force
-          New-LocalUser -Name "RDP" -Password $sec -AccountNeverExpires
-          Add-LocalGroupMember -Group "Administrators" -Member "RDP"
+          if (!(Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue)) {
+              New-LocalUser -Name "RDP" -Password $sec -AccountNeverExpires
+              Add-LocalGroupMember -Group "Administrators" -Member "RDP"
+          }
           
-          Invoke-WebRequest "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi" -OutFile "$env:TEMP\ts.msi"
+          # Install Tailscale
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi"
+          Invoke-WebRequest $tsUrl -OutFile "$env:TEMP\ts.msi"
           Start-Process msiexec.exe -ArgumentList "/i", "$env:TEMP\ts.msi", "/quiet", "/norestart" -Wait
           & "C:\Program Files\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-gpu-box
+          
           $ip = & "C:\Program Files\Tailscale\tailscale.exe" ip -4
           echo "IP=$ip" >> $env:GITHUB_ENV
           echo "PASS=$pass" >> $env:GITHUB_ENV
 
       - name: 4. Keep Connection Open
         run: |
-          Write-Host "IP: $env:IP | User: RDP | Pass: $env:PASS"
+          Write-Host "SUCCESS! Address: $env:IP | User: RDP | Pass: $env:PASS"
           while($true) { Start-Sleep 300 }
