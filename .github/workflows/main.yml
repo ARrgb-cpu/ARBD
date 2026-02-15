@@ -1,4 +1,4 @@
-name: RDP-with-Virtual-GPU-Final
+name: RDP-Virtual-Hardware-GPU
 
 on:
   workflow_dispatch:
@@ -13,72 +13,59 @@ jobs:
         run: |
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 1 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 1 -Force
-          netsh advfirewall firewall delete rule name="RDP-Tailscale" 2>$null
           netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
           Restart-Service -Name TermService -Force
 
-      - name: Install Virtual GPU (Mesa 3D)
-        continue-on-error: true
+      - name: Install Virtual Display Driver (Task Manager GPU)
         run: |
-          Set-ExecutionPolicy Bypass -Scope Process -Force
-          iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
-          choco install mesa-dist-win -y --no-progress
+          # Download the Virtual Display Driver to trick Windows into enabling GPU features
+          $url = "https://github.com/roshkins/IddSampleDriver/releases/download/v0.1.1/IddSampleDriver.zip"
+          $output = "$env:TEMP\IddDriver.zip"
+          Invoke-WebRequest -Uri $url -OutFile $output
+          Expand-Archive $output -DestinationPath "$env:TEMP\IddDriver"
+          
+          # Install the driver cert and the driver itself
+          # Note: This creates a 'Virtual Monitor' which forces the GPU stack to initialize
+          cd "$env:TEMP\IddDriver"
+          Import-Certificate -FilePath .\IddSampleDriver.cer -CertStoreLocation Cert:\LocalMachine\TrustedPublisher
+          pnputil /add-driver IddSampleDriver.inf /install
+          Write-Host "Virtual GPU Device Added to Device Manager."
+
+      - name: Inject 8GB VRAM Registry Hack
+        run: |
+          $paths = @(
+            "HKLM:\SOFTWARE\Microsoft\DirectX",
+            "HKLM:\SOFTWARE\Wow6432Node\Microsoft\DirectX"
+          )
+          foreach ($path in $paths) {
+            if (-not (Test-Path $path)) { New-Item -Path $path -Force }
+            # 8GB in Bytes = 8589934592
+            New-ItemProperty -Path $path -Name "DedicatedVideoMemory" -Value 8589934592 -PropertyType QWORD -Force
+            New-ItemProperty -Path $path -Name "DedicatedSystemMemory" -Value 0 -PropertyType QWORD -Force
+          }
+          Write-Host "Registry Fooled: 8GB VRAM reported."
 
       - name: Create RDP User
         run: |
-          $username = "RDP"
-          $password = "P@ssw0rd1234!" 
+          $password = "P@ssw0rd1234!"
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
-          if (Get-LocalUser -Name $username -ErrorAction SilentlyContinue) { Remove-LocalUser -Name $username }
-          New-LocalUser -Name $username -Password $securePass -AccountNeverExpires
-          Add-LocalGroupMember -Group "Administrators" -Member $username
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
+          New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
+          Add-LocalGroupMember -Group "Administrators" -Member "RDP"
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
           echo "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
 
-      - name: Install Tailscale
+      - name: Install & Connect Tailscale
         run: |
           $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi"
-          $installerPath = "$env:TEMP\tailscale.msi"
-          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
-          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
-          
-          # Force the environment to recognize the new Tailscale PATH
+          Invoke-WebRequest -Uri $tsUrl -OutFile "$env:TEMP\ts.msi"
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$env:TEMP\ts.msi`"", "/quiet", "/norestart" -Wait
           $env:Path += ";C:\Program Files\Tailscale"
-          Write-Host "Tailscale installed and Path updated."
-
-      - name: Establish Tailscale Connection
-        run: |
-          $env:Path += ";C:\Program Files\Tailscale"
-          
-          # Verify the service is actually running
-          $service = Get-Service -Name Tailscale -ErrorAction SilentlyContinue
-          if ($service.Status -ne 'Running') { Start-Service Tailscale }
-
-          # Login Attempt
-          & tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-rdp --accept-routes
-          
-          # Retry loop for IP assignment
-          $tsIP = ""
-          for ($i=0; $i -lt 12; $i++) {
-              $tsIP = & tailscale ip -4
-              if ($tsIP) { break }
-              Write-Host "Waiting for Tailscale IP..."
-              Start-Sleep -Seconds 5
-          }
-          
-          if (-not $tsIP) { 
-              Write-Error "Tailscale failed to connect. Check your Auth Key permissions (ensure it isn't expired)."
-              exit 1 
-          }
+          & tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-gpu-runner
+          $tsIP = & tailscale ip -4
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
-      
-      - name: Final Connectivity & Wait
+
+      - name: Stay Alive
         run: |
-          Write-Host "=============================="
-          Write-Host "RDP Address: $env:TAILSCALE_IP"
-          Write-Host "Username: RDP"
-          Write-Host "Password: $env:RDP_PASSWORD"
-          Write-Host "Virtual GPU: Active (Mesa LLVMpipe)"
-          Write-Host "=============================="
+          Write-Host "IP: $env:TAILSCALE_IP | User: RDP | Pass: $env:RDP_PASSWORD"
           while ($true) { Start-Sleep -Seconds 300 }
+  
