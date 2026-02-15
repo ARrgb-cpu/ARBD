@@ -1,50 +1,38 @@
-name: RDP-GPU-Fixed-Link
+name: RDP-GPU-Final-V3
 
 on:
   workflow_dispatch:
 
 jobs:
-  build:
+  secure-rdp:
     runs-on: windows-latest
     timeout-minutes: 3600
 
     steps:
-      - name: 1. Setup RDP Environment
+      - name: 1. Configure RDP & Windows
         run: |
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 1 -Force
           netsh advfirewall firewall add rule name="RDP" dir=in action=allow protocol=TCP localport=3389
           Restart-Service -Name TermService -Force
 
-      - name: 2. Install Virtual GPU (Fixed Link)
+      - name: 2. Install Virtual Display Driver (Task Manager GPU)
         run: |
-          # Using a more reliable link for the IddSampleDriver
-          $url = "https://github.com/roshkins/IddSampleDriver/releases/download/v0.1.1/IddSampleDriver.zip"
-          $zipPath = "$env:TEMP\gpu.zip"
-          $destPath = "$env:TEMP\gpu-driver"
-
-          # Download with Error Handling
-          try {
-              Invoke-WebRequest -Uri $url -OutFile $zipPath -ErrorAction Stop
-              Expand-Archive $zipPath -DestinationPath $destPath -Force
-          } catch {
-              Write-Host "Primary link failed, attempting secondary..."
-              # Alternate download method if first fails
-              Start-BitsTransfer -Source $url -Destination $zipPath
-              Expand-Archive $zipPath -DestinationPath $destPath -Force
-          }
-
-          # Install Driver
-          cd $destPath
-          Import-Certificate -FilePath .\IddSampleDriver.cer -CertStoreLocation Cert:\LocalMachine\TrustedPublisher
-          pnputil /add-driver IddSampleDriver.inf /install
+          # Using Chocolatey to install a virtual driver is more stable than manual zips
+          choco install usbmmidd_v2 -y
           
-          # Force 8GB Registry Trick
+          # Activate the virtual device
+          cd "C:\temp\usbmmidd_v2" 2>$null || cd "C:\usbmmidd_v2"
+          .\deviceinstaller64.exe install usbmmidd.inf usbmmidd
+          .\deviceinstaller64.exe enableidd 1
+          
+          # Registry Hack to force 8GB VRAM reporting
           $regPath = "HKLM:\SOFTWARE\Microsoft\DirectX"
           if (!(Test-Path $regPath)) { New-Item $regPath -Force }
           New-ItemProperty -Path $regPath -Name "DedicatedVideoMemory" -Value 8589934592 -PropertyType QWORD -Force
+          Write-Host "Virtual GPU Device initialized."
 
-      - name: 3. Create User & Tailscale
+      - name: 3. Create User & Connect Tailscale
         run: |
           $pass = "P@ssw0rd1234!"
           $sec = ConvertTo-SecureString $pass -AsPlainText -Force
@@ -54,16 +42,19 @@ jobs:
           }
           
           # Install Tailscale
-          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi"
-          Invoke-WebRequest $tsUrl -OutFile "$env:TEMP\ts.msi"
+          Invoke-WebRequest "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi" -OutFile "$env:TEMP\ts.msi"
           Start-Process msiexec.exe -ArgumentList "/i", "$env:TEMP\ts.msi", "/quiet", "/norestart" -Wait
-          & "C:\Program Files\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-gpu-box
           
+          # Start Tailscale
+          & "C:\Program Files\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-gpu-box
           $ip = & "C:\Program Files\Tailscale\tailscale.exe" ip -4
           echo "IP=$ip" >> $env:GITHUB_ENV
           echo "PASS=$pass" >> $env:GITHUB_ENV
 
-      - name: 4. Keep Connection Open
+      - name: 4. Maintain Connection
         run: |
-          Write-Host "SUCCESS! Address: $env:IP | User: RDP | Pass: $env:PASS"
+          Write-Host "SUCCESS!"
+          Write-Host "IP: $env:IP"
+          Write-Host "User: RDP"
+          Write-Host "Pass: $env:PASS"
           while($true) { Start-Sleep 300 }
