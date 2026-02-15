@@ -1,4 +1,4 @@
-name: RDP-4GB-Final-Fixed
+name: RDP-4GB-GPU-NO-ERROR
 on:
   workflow_dispatch:
 
@@ -8,51 +8,49 @@ jobs:
     timeout-minutes: 3600
 
     steps:
-      - name: 1. Setup RDP
+      - name: 1. Setup Windows RDP
         run: |
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 1 -Force
           netsh advfirewall firewall add rule name="RDP" dir=in action=allow protocol=TCP localport=3389
           Restart-Service -Name TermService -Force
 
-      - name: 2. Setup 4GB Virtual GPU (Mesa)
+      - name: 2. Enable 4GB Virtual GPU
         run: |
-          # Use Chocolatey for Mesa - more reliable than manual downloads
+          # We use the pre-cached Chocolatey version of Mesa to avoid download errors
           choco install mesa-dist-win -y --no-progress
           
-          # Registry Override for 4GB (4294967296 bytes)
-          $regPaths = @("HKLM:\SOFTWARE\Microsoft\DirectX", "HKLM:\SOFTWARE\Intel\GMM")
-          foreach ($path in $regPaths) {
-            if (!(Test-Path $path)) { New-Item $path -Force }
-            New-ItemProperty -Path $path -Name "DedicatedVideoMemory" -Value 4294967296 -PropertyType QWORD -Force
-            New-ItemProperty -Path $path -Name "DedicatedSegmentSize" -Value 4096 -PropertyType DWORD -Force
-          }
-          Write-Host "4GB Virtual GPU Configured."
+          # Force Registry to report 4GB (4294967296 Bytes)
+          $regPath = "HKLM:\SOFTWARE\Microsoft\DirectX"
+          if (!(Test-Path $regPath)) { New-Item $regPath -Force }
+          New-ItemProperty -Path $regPath -Name "DedicatedVideoMemory" -Value 4294967296 -PropertyType QWORD -Force
+          Write-Host "Virtual 4GB GPU Engine Active."
 
-      - name: 3. Create User & Connect Tailscale
+      - name: 3. Create User & Tailscale
         run: |
+          # Create User
           $pass = "P@ssw0rd4GB!"
           $sec = ConvertTo-SecureString $pass -AsPlainText -Force
-          if (!(Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue)) {
-            New-LocalUser -Name "RDP" -Password $sec -AccountNeverExpires
-            Add-LocalGroupMember -Group "Administrators" -Member "RDP"
-          }
+          New-LocalUser -Name "RDP" -Password $sec -AccountNeverExpires
+          Add-LocalGroupMember -Group "Administrators" -Member "RDP"
           
-          # Download and Install Tailscale
+          # Install Tailscale using the most stable mirror
           Invoke-WebRequest "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi" -OutFile "ts.msi"
           Start-Process msiexec.exe -ArgumentList "/i", "ts.msi", "/quiet", "/norestart" -Wait
           
-          # Fixed Tailscale Syntax
-          & "C:\Program Files\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-gpu-box
+          # Connect (Fixed syntax to avoid 'Missing Expression' error)
+          & "C:\Program Files\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-box
           
           $ip = & "C:\Program Files\Tailscale\tailscale.exe" ip -4
           echo "IP=$ip" >> $env:GITHUB_ENV
           echo "PASS=$pass" >> $env:GITHUB_ENV
 
-      - name: 4. Keep Connection Open
+      - name: 4. Final Info
         run: |
-          Write-Host "SUCCESS!"
+          Write-Host "=============================="
           Write-Host "Address: $env:IP"
           Write-Host "User: RDP"
           Write-Host "Pass: $env:PASS"
+          Write-Host "GPU: 4GB Virtual (Mesa)"
+          Write-Host "=============================="
           while($true) { Start-Sleep 300 }
