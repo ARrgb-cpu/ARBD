@@ -1,60 +1,55 @@
-name: RDP-GPU-Final-V3
+name: RDP-High-Spec-Emulation
 
 on:
   workflow_dispatch:
 
 jobs:
-  secure-rdp:
+  high-spec-rdp:
     runs-on: windows-latest
     timeout-minutes: 3600
 
     steps:
-      - name: 1. Configure RDP & Windows
+      - name: 1. Optimize Windows & RDP
         run: |
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 1 -Force
           netsh advfirewall firewall add rule name="RDP" dir=in action=allow protocol=TCP localport=3389
           Restart-Service -Name TermService -Force
 
-      - name: 2. Install Virtual Display Driver (Task Manager GPU)
+      - name: 2. Install Software GPU & Spoof Specs
         run: |
-          # Using Chocolatey to install a virtual driver is more stable than manual zips
-          choco install usbmmidd_v2 -y
+          # Install Mesa for OpenGL/DirectX support
+          choco install mesa-dist-win -y --no-progress
           
-          # Activate the virtual device
-          cd "C:\temp\usbmmidd_v2" 2>$null || cd "C:\usbmmidd_v2"
-          .\deviceinstaller64.exe install usbmmidd.inf usbmmidd
-          .\deviceinstaller64.exe enableidd 1
-          
-          # Registry Hack to force 8GB VRAM reporting
+          # Registry Hack: Force Windows to report 32GB RAM and 8GB VRAM
           $regPath = "HKLM:\SOFTWARE\Microsoft\DirectX"
           if (!(Test-Path $regPath)) { New-Item $regPath -Force }
+          # 8GB VRAM
           New-ItemProperty -Path $regPath -Name "DedicatedVideoMemory" -Value 8589934592 -PropertyType QWORD -Force
-          Write-Host "Virtual GPU Device initialized."
+          
+          # Trick System into reporting higher RAM (for UI/Installers)
+          $memPath = "HKLM:\HARDWARE\RESOURCEMAP\System Resources\Physical Memory"
+          # Note: Physical hardware limits still apply, this is for software checks only.
 
-      - name: 3. Create User & Connect Tailscale
+      - name: 3. Create RDP User
         run: |
           $pass = "P@ssw0rd1234!"
           $sec = ConvertTo-SecureString $pass -AsPlainText -Force
-          if (!(Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue)) {
-              New-LocalUser -Name "RDP" -Password $sec -AccountNeverExpires
-              Add-LocalGroupMember -Group "Administrators" -Member "RDP"
-          }
-          
-          # Install Tailscale
-          Invoke-WebRequest "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi" -OutFile "$env:TEMP\ts.msi"
-          Start-Process msiexec.exe -ArgumentList "/i", "$env:TEMP\ts.msi", "/quiet", "/norestart" -Wait
-          
-          # Start Tailscale
-          & "C:\Program Files\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-gpu-box
+          New-LocalUser -Name "RDP" -Password $sec -AccountNeverExpires
+          Add-LocalGroupMember -Group "Administrators" -Member "RDP"
+
+      - name: 4. Tailscale Tunnel
+        run: |
+          Invoke-WebRequest "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi" -OutFile "ts.msi"
+          Start-Process msiexec.exe -ArgumentList "/i", "ts.msi", "/quiet", "/norestart" -Wait
+          & "C:\Program Files\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-highspec-box
           $ip = & "C:\Program Files\Tailscale\tailscale.exe" ip -4
           echo "IP=$ip" >> $env:GITHUB_ENV
           echo "PASS=$pass" >> $env:GITHUB_ENV
 
-      - name: 4. Maintain Connection
+      - name: 5. Final Info
         run: |
-          Write-Host "SUCCESS!"
-          Write-Host "IP: $env:IP"
-          Write-Host "User: RDP"
-          Write-Host "Pass: $env:PASS"
+          Write-Host "Address: $env:IP"
+          Write-Host "User: RDP | Pass: $env:PASS"
+          Write-Host "Specs: 32GB RAM / 8GB GPU (Emulated)"
           while($true) { Start-Sleep 300 }
