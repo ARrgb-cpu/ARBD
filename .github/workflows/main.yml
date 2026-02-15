@@ -1,55 +1,51 @@
-name: RDP-High-Spec-Emulation
-
+name: RDP-High-Spec-Spoof
 on:
   workflow_dispatch:
 
 jobs:
-  high-spec-rdp:
+  fake-specs-rdp:
     runs-on: windows-latest
     timeout-minutes: 3600
 
     steps:
-      - name: 1. Optimize Windows & RDP
+      - name: 1. Configure Windows
         run: |
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 1 -Force
           netsh advfirewall firewall add rule name="RDP" dir=in action=allow protocol=TCP localport=3389
           Restart-Service -Name TermService -Force
 
-      - name: 2. Install Software GPU & Spoof Specs
+      - name: 2. Inject 32GB RAM & 8GB GPU (Spoofing)
         run: |
-          # Install Mesa for OpenGL/DirectX support
+          # Install Mesa (Software GPU) via Chocolatey
           choco install mesa-dist-win -y --no-progress
           
-          # Registry Hack: Force Windows to report 32GB RAM and 8GB VRAM
+          # Registry Hack to claim 8GB VRAM (8589934592 bytes)
           $regPath = "HKLM:\SOFTWARE\Microsoft\DirectX"
           if (!(Test-Path $regPath)) { New-Item $regPath -Force }
-          # 8GB VRAM
           New-ItemProperty -Path $regPath -Name "DedicatedVideoMemory" -Value 8589934592 -PropertyType QWORD -Force
           
-          # Trick System into reporting higher RAM (for UI/Installers)
-          $memPath = "HKLM:\HARDWARE\RESOURCEMAP\System Resources\Physical Memory"
-          # Note: Physical hardware limits still apply, this is for software checks only.
+          # Registry Hack to spoof 32GB RAM
+          # WARNING: This only changes how it looks in some system menus. 
+          # The machine will still crash if you actually try to use more than 7GB.
+          $memPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management"
+          New-ItemProperty -Path $memPath -Name "PhysicalAddressExtension" -Value 1 -PropertyType DWORD -Force
 
-      - name: 3. Create RDP User
+      - name: 3. Create User & Tailscale
         run: |
           $pass = "P@ssw0rd1234!"
           $sec = ConvertTo-SecureString $pass -AsPlainText -Force
           New-LocalUser -Name "RDP" -Password $sec -AccountNeverExpires
           Add-LocalGroupMember -Group "Administrators" -Member "RDP"
-
-      - name: 4. Tailscale Tunnel
-        run: |
+          
           Invoke-WebRequest "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi" -OutFile "ts.msi"
           Start-Process msiexec.exe -ArgumentList "/i", "ts.msi", "/quiet", "/norestart" -Wait
-          & "C:\Program Files\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-highspec-box
+          & "C:\Program Files\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-highspec
           $ip = & "C:\Program Files\Tailscale\tailscale.exe" ip -4
           echo "IP=$ip" >> $env:GITHUB_ENV
           echo "PASS=$pass" >> $env:GITHUB_ENV
 
-      - name: 5. Final Info
+      - name: 4. Final Connection
         run: |
-          Write-Host "Address: $env:IP"
-          Write-Host "User: RDP | Pass: $env:PASS"
-          Write-Host "Specs: 32GB RAM / 8GB GPU (Emulated)"
+          Write-Host "IP: $env:IP | User: RDP | Pass: $env:PASS"
           while($true) { Start-Sleep 300 }
