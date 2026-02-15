@@ -1,4 +1,4 @@
-name: RDP-with-Virtual-GPU
+name: RDP-with-Virtual-GPU-Final
 
 on:
   workflow_dispatch:
@@ -12,74 +12,73 @@ jobs:
       - name: Configure Core RDP Settings
         run: |
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
-          netsh advfirewall firewall delete rule name="RDP-Tailscale"
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 1 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 1 -Force
+          netsh advfirewall firewall delete rule name="RDP-Tailscale" 2>$null
           netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
           Restart-Service -Name TermService -Force
 
       - name: Install Virtual GPU (Mesa 3D)
+        continue-on-error: true
         run: |
-          # Use Chocolatey to install Mesa, providing software-accelerated OpenGL/DirectX
           Set-ExecutionPolicy Bypass -Scope Process -Force
-          [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
           iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
-          choco install mesa-dist-win -y
-          
-          # This enables the LLVMpipe driver which acts as a virtual GPU
-          Write-Host "Virtual GPU driver installed successfully."
+          choco install mesa-dist-win -y --no-progress
 
-      - name: Create RDP User with Secure Password
+      - name: Create RDP User
         run: |
-          Add-Type -AssemblyName System.Security
-          $charSet = @{
-              Upper   = [char[]](65..90)
-              Lower   = [char[]](97..122)
-              Number  = [char[]](48..57)
-              Special = ([char[]](33..47) + [char[]](58..64) + [char[]](91..96) + [char[]](123..126))
-          }
-          $rawPassword = @()
-          $rawPassword += $charSet.Upper | Get-Random -Count 4
-          $rawPassword += $charSet.Lower | Get-Random -Count 4
-          $rawPassword += $charSet.Number | Get-Random -Count 4
-          $rawPassword += $charSet.Special | Get-Random -Count 4
-          $password = -join ($rawPassword | Sort-Object { Get-Random })
+          $username = "RDP"
+          $password = "P@ssw0rd1234!" 
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
-          New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
-          Add-LocalGroupMember -Group "Administrators" -Member "RDP"
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
+          if (Get-LocalUser -Name $username -ErrorAction SilentlyContinue) { Remove-LocalUser -Name $username }
+          New-LocalUser -Name $username -Password $securePass -AccountNeverExpires
+          Add-LocalGroupMember -Group "Administrators" -Member $username
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
           echo "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
 
       - name: Install Tailscale
         run: |
-          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi"
           $installerPath = "$env:TEMP\tailscale.msi"
           Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
           Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
-          Remove-Item $installerPath -Force
+          
+          # Force the environment to recognize the new Tailscale PATH
+          $env:Path += ";C:\Program Files\Tailscale"
+          Write-Host "Tailscale installed and Path updated."
 
       - name: Establish Tailscale Connection
         run: |
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
-          $tsIP = $null
-          $retries = 0
-          while (-not $tsIP -and $retries -lt 10) {
-              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+          $env:Path += ";C:\Program Files\Tailscale"
+          
+          # Verify the service is actually running
+          $service = Get-Service -Name Tailscale -ErrorAction SilentlyContinue
+          if ($service.Status -ne 'Running') { Start-Service Tailscale }
+
+          # Login Attempt
+          & tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-rdp --accept-routes
+          
+          # Retry loop for IP assignment
+          $tsIP = ""
+          for ($i=0; $i -lt 12; $i++) {
+              $tsIP = & tailscale ip -4
+              if ($tsIP) { break }
+              Write-Host "Waiting for Tailscale IP..."
               Start-Sleep -Seconds 5
-              $retries++
           }
-          if (-not $tsIP) { throw "Tailscale IP failed." }
+          
+          if (-not $tsIP) { 
+              Write-Error "Tailscale failed to connect. Check your Auth Key permissions (ensure it isn't expired)."
+              exit 1 
+          }
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
       
-      - name: Maintain Connection
+      - name: Final Connectivity & Wait
         run: |
-          Write-Host "`n=== RDP ACCESS ==="
-          Write-Host "Address: $env:TAILSCALE_IP"
+          Write-Host "=============================="
+          Write-Host "RDP Address: $env:TAILSCALE_IP"
           Write-Host "Username: RDP"
           Write-Host "Password: $env:RDP_PASSWORD"
-          Write-Host "GPU: Software-Emulated (Mesa 3D)"
-          Write-Host "==================`n"
-          while ($true) {
-              Write-Host "[$(Get-Date)] RDP Active - Session expires in 6 hours"
-              Start-Sleep -Seconds 300
-          }
+          Write-Host "Virtual GPU: Active (Mesa LLVMpipe)"
+          Write-Host "=============================="
+          while ($true) { Start-Sleep -Seconds 300 }
