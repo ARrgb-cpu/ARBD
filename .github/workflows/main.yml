@@ -1,4 +1,4 @@
-name: RDP-4GB-GPU-Manual-Fix
+name: RDP-4GB-Final-Fixed
 on:
   workflow_dispatch:
 
@@ -8,52 +8,51 @@ jobs:
     timeout-minutes: 3600
 
     steps:
-      - name: 1. Configure RDP
+      - name: 1. Setup RDP
         run: |
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 1 -Force
           netsh advfirewall firewall add rule name="RDP" dir=in action=allow protocol=TCP localport=3389
           Restart-Service -Name TermService -Force
 
-      - name: 2. Install Virtual GPU (Manual Method)
+      - name: 2. Setup 4GB Virtual GPU (Mesa)
         run: |
-          # Download the driver directly from the source
-          $url = "https://www.amyuni.com/downloads/usbmmidd.zip"
-          $zipFile = "$env:TEMP\usbmmidd.zip"
-          $destDir = "$env:TEMP\usbmmidd"
-          Invoke-WebRequest -Uri $url -OutFile $zipFile
-          Expand-Archive -Path $zipFile -DestinationPath $destDir -Force
-
-          # Install the driver using PnPUtil (Windows Native)
-          cd $destDir
-          # We need to use the 64-bit installer
-          .\deviceinstaller64.exe install usbmmidd.inf usbmmidd
-          .\deviceinstaller64.exe enableidd 1
+          # Use Chocolatey for Mesa - more reliable than manual downloads
+          choco install mesa-dist-win -y --no-progress
           
-          # Force Registry to report exactly 4GB VRAM
+          # Registry Override for 4GB (4294967296 bytes)
           $regPaths = @("HKLM:\SOFTWARE\Microsoft\DirectX", "HKLM:\SOFTWARE\Intel\GMM")
           foreach ($path in $regPaths) {
             if (!(Test-Path $path)) { New-Item $path -Force }
             New-ItemProperty -Path $path -Name "DedicatedVideoMemory" -Value 4294967296 -PropertyType QWORD -Force
             New-ItemProperty -Path $path -Name "DedicatedSegmentSize" -Value 4096 -PropertyType DWORD -Force
           }
+          Write-Host "4GB Virtual GPU Configured."
 
-      - name: 3. Create User & Tailscale
+      - name: 3. Create User & Connect Tailscale
         run: |
           $pass = "P@ssw0rd4GB!"
           $sec = ConvertTo-SecureString $pass -AsPlainText -Force
-          New-LocalUser -Name "RDP" -Password $sec -AccountNeverExpires
-          Add-LocalGroupMember -Group "Administrators" -Member "RDP"
+          if (!(Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue)) {
+            New-LocalUser -Name "RDP" -Password $sec -AccountNeverExpires
+            Add-LocalGroupMember -Group "Administrators" -Member "RDP"
+          }
           
+          # Download and Install Tailscale
           Invoke-WebRequest "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi" -OutFile "ts.msi"
           Start-Process msiexec.exe -ArgumentList "/i", "ts.msi", "/quiet", "/norestart" -Wait
+          
+          # Fixed Tailscale Syntax
           & "C:\Program Files\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-gpu-box
           
           $ip = & "C:\Program Files\Tailscale\tailscale.exe" ip -4
           echo "IP=$ip" >> $env:GITHUB_ENV
           echo "PASS=$pass" >> $env:GITHUB_ENV
 
-      - name: 4. Final Connection
+      - name: 4. Keep Connection Open
         run: |
-          Write-Host "SUCCESS! IP: $env:IP | User: RDP | Pass: $env:PASS"
+          Write-Host "SUCCESS!"
+          Write-Host "Address: $env:IP"
+          Write-Host "User: RDP"
+          Write-Host "Pass: $env:PASS"
           while($true) { Start-Sleep 300 }
